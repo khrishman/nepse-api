@@ -2,13 +2,17 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 app = Flask(__name__)
 CORS(app)
 
 nepal_tz = pytz.timezone("Asia/Kathmandu")
+
+cached_data = None
+last_fetch_time = None
+CACHE_SECONDS = 10
 
 
 @app.route("/")
@@ -21,21 +25,31 @@ def index():
 
 @app.route("/api/stocks")
 def get_stocks():
+    global cached_data, last_fetch_time
+
+    now = datetime.now(nepal_tz)
+
+    if cached_data is not None and last_fetch_time is not None:
+        if now - last_fetch_time < timedelta(seconds=CACHE_SECONDS):
+            return jsonify({
+                "source": "cache",
+                "count": len(cached_data),
+                "updated_at": last_fetch_time.strftime("%Y-%m-%d %H:%M:%S"),
+                "data": cached_data
+            })
+
     url = "https://merolagani.com/LatestMarket.aspx"
 
     try:
         response = requests.get(
             url,
-            headers={
-                "User-Agent": "Mozilla/5.0"
-            },
+            headers={"User-Agent": "Mozilla/5.0"},
             timeout=10
         )
 
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, "html.parser")
-
         rows = soup.select(".normal-row, .increase-row, .decrease-row, .nochange-row")
 
         stocks = []
@@ -52,27 +66,25 @@ def get_stocks():
                     "low": cols[4].get_text(strip=True),
                     "open": cols[5].get_text(strip=True),
                     "volume": cols[6].get_text(strip=True),
-                    "time": datetime.now(nepal_tz).strftime("%Y-%m-%d %H:%M:%S")
+                    "time": now.strftime("%Y-%m-%d %H:%M:%S")
                 }
 
                 if stock["symbol"]:
                     stocks.append(stock)
 
+        cached_data = stocks
+        last_fetch_time = now
+
         return jsonify({
+            "source": "live",
             "count": len(stocks),
-            "updated_at": datetime.now(nepal_tz).strftime("%Y-%m-%d %H:%M:%S"),
+            "updated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
             "data": stocks
         })
 
-    except requests.exceptions.RequestException as e:
-        return jsonify({
-            "error": "Failed to fetch data from Merolagani",
-            "details": str(e)
-        }), 500
-
     except Exception as e:
         return jsonify({
-            "error": "Something went wrong while scraping NEPSE data",
+            "error": "Failed to fetch NEPSE data",
             "details": str(e)
         }), 500
 
